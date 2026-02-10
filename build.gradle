@@ -3,11 +3,28 @@ plugins{
 }
 
 group = "stealthpath"
-version = "5.2.0"
+version = "5.2.1"
+
+java{
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
 
 repositories{
     mavenCentral()
     maven{ url "https://jitpack.io" }
+}
+
+def mindustryVersion = (findProperty("mindustryVersion") ?: "v154.3").toString()
+
+configurations.configureEach{
+    resolutionStrategy.eachDependency{ details ->
+        // MindustryJitpack can request Arc modules by commit hash, but JitPack hosts tag versions.
+        if(details.requested.group == "com.github.Anuken.Arc" && details.requested.version == "ec5df18e54"){
+            details.useVersion(mindustryVersion)
+            details.because("Use JitPack Arc tag artifacts for stable dependency resolution")
+        }
+    }
 }
 
 dependencies{
@@ -16,13 +33,15 @@ dependencies{
         compileOnly project(":core")
     }else{
         // Standalone build: fetch Mindustry core from JitPack.
-        def mindustryVersion = (findProperty("mindustryVersion") ?: "v154.3").toString()
         compileOnly "com.github.Anuken.MindustryJitpack:core:$mindustryVersion"
     }
 }
 
 tasks.withType(JavaCompile).configureEach{
     options.encoding = "UTF-8"
+    if(JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_1_9)){
+        options.release.set(8)
+    }
 }
 
 jar{
@@ -51,13 +70,18 @@ tasks.register("copyZipToDist", Copy){
     doNotTrackState("Copying into dist is a convenience step; state tracking is unnecessary here.")
 }
 
-// Keep a copy in workspace root "构建/" for archiving.
+// Keep a copy in workspace root "构建/<mod-name>/" for archiving.
+def buildCopyDir = new File(rootDir.parentFile, "构建/${project.name}")
+
 tasks.register("copyZipToBuildFolder", Copy){
     dependsOn tasks.named("jar")
     mustRunAfter tasks.named("copyZipToDist")
     from(tasks.named("jar").flatMap{ it.archiveFile })
-    into(new File(rootDir.parentFile, "构建"))
+    into(buildCopyDir)
     rename{ _ -> "${project.name}-${project.version}.zip" }
+    doFirst{
+        buildCopyDir.mkdirs()
+    }
     doNotTrackState("Copying into workspace build folder is a convenience step; state tracking is unnecessary here.")
 }
 
@@ -164,4 +188,20 @@ tasks.register("copyAndroidJarToDist", Copy){
     into(new File(project.projectDir, "dist"))
     rename{ _ -> "${project.name}-android.jar" }
     doNotTrackState("Copying into dist is a convenience step; state tracking is unnecessary here.")
+}
+
+tasks.register("copyAndroidJarToBuildFolder", Copy){
+    dependsOn(tasks.named("jarAndroid"))
+    from(tasks.named("jarAndroid").flatMap{ it.archiveFile })
+    into(buildCopyDir)
+    rename{ _ -> "${project.name}-${project.version}-android.jar" }
+    doFirst{
+        buildCopyDir.mkdirs()
+    }
+    doNotTrackState("Copying into workspace build folder is a convenience step; state tracking is unnecessary here.")
+}
+
+tasks.named("jarAndroid").configure{
+    finalizedBy tasks.named("copyAndroidJarToDist")
+    finalizedBy tasks.named("copyAndroidJarToBuildFolder")
 }

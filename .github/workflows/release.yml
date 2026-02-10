@@ -2,10 +2,14 @@ name: Release (Main Builds)
 
 on:
   push:
-    branches: [ main ]
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (must start with v, e.g. v5.2.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -34,28 +38,32 @@ jobs:
       - name: Build
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon clean jar jarAndroid copyAndroidJarToDist
+          ./gradlew --no-daemon clean jar jarAndroid
 
       - name: Compute tag
         id: vars
         shell: bash
         run: |
+          tag=""
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "name=Release ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "allowUpdates=true" >> "$GITHUB_OUTPUT"
+            tag="${GITHUB_REF_NAME}"
           else
-            short_sha="${GITHUB_SHA::7}"
-            echo "tag=main-${GITHUB_RUN_NUMBER}-${short_sha}" >> "$GITHUB_OUTPUT"
-            echo "name=Main build main-${GITHUB_RUN_NUMBER}-${short_sha}" >> "$GITHUB_OUTPUT"
-            echo "allowUpdates=false" >> "$GITHUB_OUTPUT"
+            tag="${{ github.event.inputs.tag }}"
           fi
+
+          if [[ -z "$tag" || ! "$tag" =~ ^v ]]; then
+            echo "Invalid tag: '$tag' (must start with v, e.g. v5.2.1)"
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "name=Release $tag" >> "$GITHUB_OUTPUT"
 
       - name: Create new release (no overwrite)
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.name }}
-          allowUpdates: ${{ steps.vars.outputs.allowUpdates }}
+          allowUpdates: false
           bodyFile: RELEASE_NOTES.md
           artifacts: dist/stealth-path.zip,dist/stealth-path-android.jar
