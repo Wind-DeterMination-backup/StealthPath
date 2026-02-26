@@ -46,11 +46,15 @@ import mindustry.ui.Fonts;
 import mindustry.ui.Styles;
 import mindustry.ui.dialogs.BaseDialog;
 import mindustry.ui.dialogs.SettingsMenuDialog;
+import mindustry.entities.bullet.BulletType;
+import mindustry.type.Liquid;
 import mindustry.world.Tile;
 import mindustry.world.Block;
 import mindustry.world.blocks.environment.Floor;
 import mindustry.world.blocks.defense.ForceProjector;
 import mindustry.world.blocks.defense.turrets.Turret;
+import mindustry.world.consumers.ConsumeLiquidBase;
+import mindustry.world.consumers.ConsumeLiquidFilter;
 import mindustry.world.blocks.power.PowerGenerator;
 import mindustry.world.blocks.storage.CoreBlock;
 import mindustry.world.meta.BuildVisibility;
@@ -133,6 +137,8 @@ public class StealthPathMod extends mindustry.mod.Mod{
     private static final String keyPathAllowSurvivableLiquidCross = "sp-path-allow-survivable-liquid-cross";
     private static final String keyDrownReserveDeciSeconds = "sp-drown-reserve-deciseconds";
     private static final String keyGoalCandidateRadiusTiles = "sp-goal-candidate-radius-tiles";
+    private static final String keyDebugRiskTextScale = "sp-debug-risk-text-scale";
+    private static final String keyDebugHoverTurretDps = "sp-debug-hover-turret-dps";
 
     private enum PathMode{
         safeOnly, minDamage, nearest
@@ -170,6 +176,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
     private static KeyBind keybindAutoMouse;
     private static KeyBind keybindAutoAttack;
     private static KeyBind keybindAutoMove;
+    private static KeyBind keybindDebugRisk;
 
     private final Seq<RenderPath> drawPaths = new Seq<>();
     private float drawUntil = 0f;
@@ -229,19 +236,33 @@ public class StealthPathMod extends mindustry.mod.Mod{
 
     private float autoNextNoUnitsToast = 0f;
 
+    private boolean debugRiskOverlayEnabled = false;
+    private final Color debugRiskColor = new Color();
+    private final Seq<String> debugHoverTurretLines = new Seq<>();
+
     // Optional MindustryX OverlayUI integration (reflection; no hard dependency).
     private final MindustryXOverlayUI xOverlayUi = new MindustryXOverlayUI();
     private Object xModeWindow;
     private Object xDamageWindow;
     private Object xControlsWindow;
+    private Object xHoverDpsWindow;
     private Table overlayModeContent;
     private Table overlayDamageContent;
     private Table overlayControlsContent;
+    private Table overlayHoverDpsContent;
     private float overlayNextAttachAttempt = 0f;
 
     private Label overlayModeValue;
     private Label overlayThreatValue;
     private Label overlayDamageValue;
+    private Label overlayHoverTileValue;
+    private Label overlayHoverListValue;
+    private Label overlayHoverTotalValue;
+
+    private int debugHoverTileX = -1;
+    private int debugHoverTileY = -1;
+    private float debugHoverTurretTotal = 0f;
+    private String debugHoverLinesText = "(disabled)";
 
     // Cached passability (expensive to recompute every frame).
     private final arc.struct.IntMap<boolean[]> passableCacheByKey = new arc.struct.IntMap<>();
@@ -364,6 +385,11 @@ public class StealthPathMod extends mindustry.mod.Mod{
 
     private static int goalCandidateRadiusTiles(){
         return clamp(Core.settings.getInt(keyGoalCandidateRadiusTiles, 24), 6, 64);
+    }
+
+    private static float debugRiskTextScaleFactor(){
+        int pct = clamp(Core.settings.getInt(keyDebugRiskTextScale, 100), 50, 400);
+        return pct / 100f;
     }
 
     private static int autoClusterSplitTiles(){
@@ -571,6 +597,8 @@ public class StealthPathMod extends mindustry.mod.Mod{
         Core.settings.defaults(keyPathAllowSurvivableLiquidCross, true);
         Core.settings.defaults(keyDrownReserveDeciSeconds, 15);
         Core.settings.defaults(keyGoalCandidateRadiusTiles, 24);
+        Core.settings.defaults(keyDebugRiskTextScale, 100);
+        Core.settings.defaults(keyDebugHoverTurretDps, false);
     }
 
     private void registerKeybinds(){
@@ -585,6 +613,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         keybindAutoMouse = KeyBind.add("sp_auto_mouse", KeyCode.n, "stealthpath");
         keybindAutoAttack = KeyBind.add("sp_auto_attack", KeyCode.m, "stealthpath");
         keybindAutoMove = KeyBind.add("sp_auto_move", KeyCode.mouseRight, "stealthpath");
+        keybindDebugRisk = KeyBind.add("sp_debug_risk", KeyCode.j, "stealthpath");
     }
 
     private void registerSettings(){
@@ -706,6 +735,8 @@ public class StealthPathMod extends mindustry.mod.Mod{
         table.pref(new IconCheckSetting(keyComputeSafeDistance, true, null, null));
         table.pref(new IconSliderSetting(keyDrownReserveDeciSeconds, 15, 0, 30, 1, null, v -> Strings.autoFixed(v / 10f, 1) + "s", null));
         table.pref(new IconSliderSetting(keyGoalCandidateRadiusTiles, 24, 6, 64, 1, null, v -> v + " tiles", null));
+        table.pref(new IconSliderSetting(keyDebugRiskTextScale, 100, 50, 400, 10, null, v -> v + "%", null));
+        table.pref(new IconCheckSetting(keyDebugHoverTurretDps, false, null, null));
 
         table.pref(new HeaderSetting("@sp.section.advanced.automove", null));
         table.pref(new IconSliderSetting(keyRtsMaxWaypoints, 12, 2, 60, 1, null, v -> String.valueOf(v), null));
@@ -935,7 +966,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
             clearPaths();
         }
 
-        if(keybindTurrets == null || keybindAll == null || keybindModifier == null || keybindCycleMode == null || keybindThreatMode == null || keybindAutoMouse == null || keybindAutoAttack == null || keybindAutoMove == null){
+        if(keybindTurrets == null || keybindAll == null || keybindModifier == null || keybindCycleMode == null || keybindThreatMode == null || keybindAutoMouse == null || keybindAutoAttack == null || keybindAutoMove == null || keybindDebugRisk == null){
             registerKeybinds();
         }
 
@@ -950,6 +981,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         boolean threatTap = modifierDown && keybindThreatMode != null && Core.input.keyTap(keybindThreatMode);
         boolean autoMouseTap = modifierDown && keybindAutoMouse != null && Core.input.keyTap(keybindAutoMouse);
         boolean autoAttackTap = modifierDown && keybindAutoAttack != null && Core.input.keyTap(keybindAutoAttack);
+        boolean debugRiskTap = modifierDown && keybindDebugRisk != null && Core.input.keyTap(keybindDebugRisk);
 
         boolean turretsTap = modifierDown && keybindTurrets != null && Core.input.keyTap(keybindTurrets);
         boolean allTap = modifierDown && keybindAll != null && Core.input.keyTap(keybindAll);
@@ -973,6 +1005,10 @@ public class StealthPathMod extends mindustry.mod.Mod{
             toggleAutoMode(autoModeAttack);
         }
 
+        if(debugRiskTap){
+            toggleDebugRiskOverlay();
+        }
+
         if(previewDown){
             lastIncludeUnits = previewIncludeUnits;
             liveRefresh(unit, previewIncludeUnits);
@@ -990,6 +1026,12 @@ public class StealthPathMod extends mindustry.mod.Mod{
         }else if(allTap){
             lastIncludeUnits = true;
             computePath(true, true);
+        }
+
+        if(Core.settings.getBool(keyDebugHoverTurretDps, false)){
+            updateHoverTurretDpsDebugData();
+        }else{
+            clearHoverDpsDebugData("(disabled)");
         }
 
         autoHandleAutoMoveKey();
@@ -1370,6 +1412,12 @@ public class StealthPathMod extends mindustry.mod.Mod{
         threatHash = 31 * threatHash + clusters.size;
 
         boolean unchanged = startHash == autoLastStartPacked && goalPacked == autoLastGoalPacked && threatHash == autoLastThreatMode;
+        if(unchanged && !issueFollowCommands && !clustersAreMoving(clusters)){
+            float idleInterval = Math.min(300f, baseInterval * autoSlowMultiplier() * 2f);
+            autoNextCompute = Time.time + idleInterval;
+            logAuto("skip recompute: unchanged goal/start and clusters idle");
+            return;
+        }
 
         logAuto(logFormat("sp.log.auto.begin",
             autoModeName(autoMode),
@@ -1501,6 +1549,25 @@ public class StealthPathMod extends mindustry.mod.Mod{
                 done = true;
             }
         }
+    }
+
+    private static boolean clusterIsMoving(ControlledCluster cluster){
+        if(cluster == null || cluster.units == null || cluster.units.isEmpty()) return false;
+        float threshold2 = 0.06f * 0.06f;
+        for(int i = 0; i < cluster.units.size; i++){
+            Unit u = cluster.units.get(i);
+            if(u == null || !u.isAdded() || u.dead()) continue;
+            if(u.vel.len2() > threshold2) return true;
+        }
+        return false;
+    }
+
+    private static boolean clustersAreMoving(Seq<ControlledCluster> clusters){
+        if(clusters == null || clusters.isEmpty()) return false;
+        for(int i = 0; i < clusters.size; i++){
+            if(clusterIsMoving(clusters.get(i))) return true;
+        }
+        return false;
     }
 
     private Seq<ControlledCluster> computeControlledClusters(){
@@ -1836,63 +1903,273 @@ public class StealthPathMod extends mindustry.mod.Mod{
         }
     }
 
+    private void toggleDebugRiskOverlay(){
+        debugRiskOverlayEnabled = !debugRiskOverlayEnabled;
+        showToast(debugRiskOverlayEnabled ? "Risk debug: ON (J)" : "Risk debug: OFF", 2.2f);
+    }
+
     private void draw(){
         if(!Core.settings.getBool(keyEnabled, true)) return;
-        if(!state.isGame() || drawPaths.isEmpty()) return;
+        if(!state.isGame()) return;
 
-        Draw.draw(Layer.overlayUI + 0.01f, () -> {
-            float baseWidth = Core.settings.getInt(keyPathWidth, 2);
-            float stroke = baseWidth / Math.max(0.0001f, renderer.getDisplayScale());
-            float alpha = Mathf.clamp(Core.settings.getInt(keyPathAlpha, 85) / 100f);
+        if(!drawPaths.isEmpty()){
+            Draw.draw(Layer.overlayUI + 0.01f, () -> {
+                float baseWidth = Core.settings.getInt(keyPathWidth, 2);
+                float stroke = baseWidth / Math.max(0.0001f, renderer.getDisplayScale());
+                float alpha = Mathf.clamp(Core.settings.getInt(keyPathAlpha, 85) / 100f);
 
-            Lines.stroke(stroke);
+                Lines.stroke(stroke);
 
-            float prevFontScale = Fonts.outline.getScaleX();
-            float textScale = (Mathf.clamp(Core.settings.getInt(keyDamageTextScale, 60) / 100f) * 0.6f) / Math.max(0.0001f, renderer.getDisplayScale());
+                float prevFontScale = Fonts.outline.getScaleX();
+                float textScale = (Mathf.clamp(Core.settings.getInt(keyDamageTextScale, 60) / 100f) * 0.6f) / Math.max(0.0001f, renderer.getDisplayScale());
+                Fonts.outline.getData().setScale(textScale);
+
+                boolean showDamageText = Core.settings.getBool(keyShowDamageText, true);
+                boolean labelAtEnd = Core.settings.getBool(keyDamageLabelAtEnd, false);
+                float offsetScale = Mathf.clamp(Core.settings.getInt(keyDamageTextOffsetScale, 100) / 100f, 0f, 5f);
+                boolean showEndpoints = Core.settings.getBool(keyShowEndpoints, true);
+                float startDotScale = Mathf.clamp(Core.settings.getInt(keyStartDotScale, 220) / 100f, 0f, 10f);
+                float endDotScale = Mathf.clamp(Core.settings.getInt(keyEndDotScale, 260) / 100f, 0f, 10f);
+
+                for(int p = 0; p < drawPaths.size; p++){
+                    RenderPath path = drawPaths.get(p);
+                    if(path == null || path.points == null || path.points.isEmpty()) continue;
+
+                    Draw.color(path.color, alpha);
+
+                    Seq<Pos> pts = path.points;
+                    for(int i = 0; i < pts.size - 1; i++){
+                        Pos a = pts.get(i);
+                        Pos b = pts.get(i + 1);
+                        if(a == null || b == null) continue;
+                        Lines.line(a.x, a.y, b.x, b.y, false);
+                    }
+
+                    Pos start = pts.first();
+                    Pos end = pts.peek();
+                    if(showEndpoints){
+                        if(start != null) Fill.circle(start.x, start.y, stroke * startDotScale);
+                        if(end != null) Fill.circle(end.x, end.y, stroke * endDotScale);
+                    }
+
+                    if(showDamageText && path.damageText != null){
+                        int labelIndex = labelAtEnd ? (pts.size - 1) : Math.min(pts.size - 1, Math.max(0, pts.size / 2));
+                        Pos labelPos = pts.get(labelIndex);
+                        if(labelPos != null){
+                            float offset = Math.max(stroke * 10f, tilesize * 0.45f) * offsetScale;
+                            Draw.color(path.color, alpha);
+                            Fonts.outline.draw(path.damageText, labelPos.x, labelPos.y + offset, Align.center);
+                        }
+                    }
+                }
+
+                Fonts.outline.getData().setScale(prevFontScale);
+                Draw.reset();
+            });
+        }
+
+        if(debugRiskOverlayEnabled){
+            drawRiskDebugOverlay();
+        }
+    }
+
+    private void drawRiskDebugOverlay(){
+        if(!debugRiskOverlayEnabled) return;
+        if(world == null || player == null) return;
+
+        PlanningStart start = computeSelectedOrPlayerStart();
+        if(start == null || start.unit == null) return;
+
+        int threatMode = Core.settings.getInt(keyThreatMode, threatModeGround);
+        boolean moveFlying = threatMode == threatModeAir;
+        boolean threatsAir = threatMode == threatModeAir || threatMode == threatModeBoth;
+        boolean threatsGround = threatMode == threatModeGround || threatMode == threatModeBoth;
+        boolean includeUnits = autoMode != autoModeOff || includeUnitsFromLast();
+
+        ThreatMap map = buildThreatMap(start.unit, start.pathUnits, includeUnits, moveFlying, threatsAir, threatsGround, start.passClearanceWorld, start.threatClearanceWorld);
+        if(map == null || map.risk == null) return;
+
+        float halfW = Core.camera.width / 2f;
+        float halfH = Core.camera.height / 2f;
+
+        int minX = clamp(worldToTile(Core.camera.position.x - halfW) - 1, 0, map.width - 1);
+        int maxX = clamp(worldToTile(Core.camera.position.x + halfW) + 1, 0, map.width - 1);
+        int minY = clamp(worldToTile(Core.camera.position.y - halfH) - 1, 0, map.height - 1);
+        int maxY = clamp(worldToTile(Core.camera.position.y + halfH) + 1, 0, map.height - 1);
+
+        float min = Float.POSITIVE_INFINITY;
+        float max = Float.NEGATIVE_INFINITY;
+        for(int y = minY; y <= maxY; y++){
+            for(int x = minX; x <= maxX; x++){
+                int idx = x + y * map.width;
+                float risk = Math.max(0f, map.risk[idx]);
+                if(risk < min) min = risk;
+                if(risk > max) max = risk;
+            }
+        }
+        if(!Float.isFinite(min) || !Float.isFinite(max)) return;
+        float range = Math.max(0.0001f, max - min);
+        final float minRisk = min;
+        final float invRange = 1f / range;
+
+        Draw.draw(Layer.overlayUI + 0.02f, () -> {
+            float prevScale = Fonts.outline.getScaleX();
+            float textScale = (0.18f * debugRiskTextScaleFactor()) / Math.max(0.0001f, renderer.getDisplayScale());
             Fonts.outline.getData().setScale(textScale);
 
-            boolean showDamageText = Core.settings.getBool(keyShowDamageText, true);
-            boolean labelAtEnd = Core.settings.getBool(keyDamageLabelAtEnd, false);
-            float offsetScale = Mathf.clamp(Core.settings.getInt(keyDamageTextOffsetScale, 100) / 100f, 0f, 5f);
-            boolean showEndpoints = Core.settings.getBool(keyShowEndpoints, true);
-            float startDotScale = Mathf.clamp(Core.settings.getInt(keyStartDotScale, 220) / 100f, 0f, 10f);
-            float endDotScale = Mathf.clamp(Core.settings.getInt(keyEndDotScale, 260) / 100f, 0f, 10f);
+            for(int y = minY; y <= maxY; y++){
+                for(int x = minX; x <= maxX; x++){
+                    int idx = x + y * map.width;
+                    float risk = Math.max(0f, map.risk[idx]);
+                    float normalized = Mathf.clamp((risk - minRisk) * invRange);
 
-            for(int p = 0; p < drawPaths.size; p++){
-                RenderPath path = drawPaths.get(p);
-                if(path == null || path.points == null || path.points.isEmpty()) continue;
-
-                Draw.color(path.color, alpha);
-
-                Seq<Pos> pts = path.points;
-                for(int i = 0; i < pts.size - 1; i++){
-                    Pos a = pts.get(i);
-                    Pos b = pts.get(i + 1);
-                    if(a == null || b == null) continue;
-                    Lines.line(a.x, a.y, b.x, b.y, false);
-                }
-
-                Pos start = pts.first();
-                Pos end = pts.peek();
-                if(showEndpoints){
-                    if(start != null) Fill.circle(start.x, start.y, stroke * startDotScale);
-                    if(end != null) Fill.circle(end.x, end.y, stroke * endDotScale);
-                }
-
-                if(showDamageText && path.damageText != null){
-                    int labelIndex = labelAtEnd ? (pts.size - 1) : Math.min(pts.size - 1, Math.max(0, pts.size / 2));
-                    Pos labelPos = pts.get(labelIndex);
-                    if(labelPos != null){
-                        float offset = Math.max(stroke * 10f, tilesize * 0.45f) * offsetScale;
-                        Draw.color(path.color, alpha);
-                        Fonts.outline.draw(path.damageText, labelPos.x, labelPos.y + offset, Align.center);
+                    if(normalized <= 0.5f){
+                        debugRiskColor.set(0.2f, 0.95f, 0.25f, 0.95f);
+                        debugRiskColor.lerp(Color.yellow, normalized * 2f);
+                    }else{
+                        debugRiskColor.set(Color.yellow);
+                        debugRiskColor.a = 0.95f;
+                        debugRiskColor.lerp(Color.red, (normalized - 0.5f) * 2f);
                     }
+                    debugRiskColor.a = 0.95f;
+                    Draw.color(debugRiskColor);
+
+                    float wx = tileToWorld(x) + tilesize * 0.5f;
+                    float wy = tileToWorld(y) + tilesize * 0.5f;
+                    int value = Mathf.clamp(Math.round(normalized * 100f), 0, 100);
+                    Fonts.outline.draw(String.valueOf(value), wx, wy + tilesize * 0.12f, Align.center);
                 }
             }
 
-            Fonts.outline.getData().setScale(prevFontScale);
+            Fonts.outline.getData().setScale(prevScale);
             Draw.reset();
         });
+    }
+
+    private void updateHoverTurretDpsDebugData(){
+        if(world == null || player == null){
+            clearHoverDpsDebugData("(not in game)");
+            return;
+        }
+
+        PlanningStart start = computeSelectedOrPlayerStart();
+        if(start == null || start.unit == null){
+            clearHoverDpsDebugData("(no start unit)");
+            return;
+        }
+
+        int tx = clamp(worldToTile(Core.input.mouseWorldX()), 0, world.width() - 1);
+        int ty = clamp(worldToTile(Core.input.mouseWorldY()), 0, world.height() - 1);
+        float tileCenterX = tileToWorld(tx) + tilesize * 0.5f;
+        float tileCenterY = tileToWorld(ty) + tilesize * 0.5f;
+
+        int threatMode = Core.settings.getInt(keyThreatMode, threatModeGround);
+        boolean threatsAir = threatMode == threatModeAir || threatMode == threatModeBoth;
+        boolean threatsGround = threatMode == threatModeGround || threatMode == threatModeBoth;
+
+        float threatInflate = Math.max(0f, start.threatClearanceWorld);
+        Seq<Building> builds = anchorBuildings();
+
+        debugHoverTurretLines.clear();
+        float total = 0f;
+        boolean hasNormal = false;
+        boolean hasDerelict = false;
+
+        for(int i = 0; i < builds.size; i++){
+            Building b = builds.get(i);
+            if(b == null || b.team == player.team()) continue;
+            if(!(b.block instanceof Turret) || !(b instanceof Turret.TurretBuild)) continue;
+
+            Turret turret = (Turret)b.block;
+            Turret.TurretBuild tb = (Turret.TurretBuild)b;
+
+            if(turret.targetHealing) continue;
+            if(!((threatsAir && turret.targetAir) || (threatsGround && turret.targetGround))) continue;
+
+            float dps = estimateTurretThreatDps(tb, turret);
+            if(dps <= 0.0001f) continue;
+            if(!turretCoversPoint(tb, tileCenterX, tileCenterY, threatInflate)) continue;
+
+            if(b.team == Team.derelict){
+                hasDerelict = true;
+            }else{
+                hasNormal = true;
+            }
+        }
+
+        boolean useDerelict = !hasNormal && hasDerelict;
+        int shown = 0;
+        int hidden = 0;
+        int maxShown = 14;
+
+        for(int i = 0; i < builds.size; i++){
+            Building b = builds.get(i);
+            if(b == null || b.team == player.team()) continue;
+            if(!(b.block instanceof Turret) || !(b instanceof Turret.TurretBuild)) continue;
+
+            Turret turret = (Turret)b.block;
+            Turret.TurretBuild tb = (Turret.TurretBuild)b;
+
+            if(turret.targetHealing) continue;
+            if(!((threatsAir && turret.targetAir) || (threatsGround && turret.targetGround))) continue;
+
+            if(useDerelict && b.team != Team.derelict) continue;
+            if(!useDerelict && b.team == Team.derelict) continue;
+
+            float dps = estimateTurretThreatDps(tb, turret);
+            if(dps <= 0.0001f) continue;
+            if(!turretCoversPoint(tb, tileCenterX, tileCenterY, threatInflate)) continue;
+
+            total += dps;
+            if(shown < maxShown){
+                debugHoverTurretLines.add(formatTurretHoverLine(b, dps));
+                shown++;
+            }else{
+                hidden++;
+            }
+        }
+
+        if(hidden > 0){
+            debugHoverTurretLines.add("... +" + hidden + " more");
+        }
+
+        if(debugHoverTurretLines.isEmpty()) debugHoverTurretLines.add("(no turret threat on this tile)");
+
+        debugHoverTileX = tx;
+        debugHoverTileY = ty;
+        debugHoverTurretTotal = total;
+        debugHoverLinesText = joinDebugLines(debugHoverTurretLines);
+    }
+
+    private void clearHoverDpsDebugData(String text){
+        debugHoverTileX = -1;
+        debugHoverTileY = -1;
+        debugHoverTurretTotal = 0f;
+        debugHoverLinesText = text == null ? "" : text;
+    }
+
+    private static String joinDebugLines(Seq<String> lines){
+        if(lines == null || lines.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for(int i = 0; i < lines.size; i++){
+            if(i > 0) sb.append('\n');
+            sb.append(lines.get(i));
+        }
+        return sb.toString();
+    }
+
+    private static boolean turretCoversPoint(Turret.TurretBuild tb, float x, float y, float threatInflate){
+        if(tb == null) return false;
+        float r = Math.max(0f, tb.range() + Math.max(0f, threatInflate));
+        float mr = Math.max(0f, tb.minRange());
+        float d2 = Mathf.dst2(tb.x, tb.y, x, y);
+        return d2 <= r * r && d2 >= mr * mr;
+    }
+
+    private static String formatTurretHoverLine(Building b, float dps){
+        String name = b == null || b.block == null ? "turret" : b.block.localizedName;
+        if(b == null) return name + ": " + Strings.autoFixed(dps, 1);
+        return name + " @(" + b.tileX() + "," + b.tileY() + "): " + Strings.autoFixed(dps, 1);
     }
 
     private void clearPaths(){
@@ -3201,16 +3478,29 @@ public class StealthPathMod extends mindustry.mod.Mod{
         fillFloorHazards(map, unit, moveFlying);
         applyShieldNoGoZones(map, passClearanceWorld);
 
-        Seq<Threat> threats = collectThreats(unit, includeUnits, threatsAir, threatsGround);
-        if(threats.isEmpty()){
-            return map;
+        float threatInflate = Math.max(0f, threatClearanceWorld);
+        Seq<Threat> turretThreats = collectTurretThreats(unit, threatsAir, threatsGround);
+        applyThreatsToRisk(map, turretThreats, threatInflate);
+
+        if(includeUnits){
+            Seq<Threat> unitThreats = collectUnitThreats(unit, threatsAir, threatsGround);
+            applyThreatsToRisk(map, unitThreats, threatInflate);
         }
 
-        float threatInflate = Math.max(0f, threatClearanceWorld);
+        if(computeSafeDistanceEnabled()){
+            computeSafeDistance(map);
+        }else{
+            map.safeDist = null;
+        }
+        return map;
+    }
+
+    private void applyThreatsToRisk(ThreatMap map, Seq<Threat> threats, float threatInflate){
+        if(map == null || threats == null || threats.isEmpty()) return;
 
         for(int i = 0; i < threats.size; i++){
             Threat t = threats.get(i);
-            if(t.dps <= 0.0001f || t.range <= 0.0001f) continue;
+            if(t == null || t.dps <= 0.0001f || t.range <= 0.0001f) continue;
 
             float r = t.range + threatInflate;
             float r2 = r * r;
@@ -3223,9 +3513,9 @@ public class StealthPathMod extends mindustry.mod.Mod{
             int maxY = clamp((int)Math.floor((t.y + r) / tilesize), 0, map.height - 1);
 
             for(int ty = minY; ty <= maxY; ty++){
-                float wy = tileToWorld(ty);
+                float wy = tileToWorld(ty) + tilesize / 2f;
                 for(int tx = minX; tx <= maxX; tx++){
-                    float wx = tileToWorld(tx);
+                    float wx = tileToWorld(tx) + tilesize / 2f;
                     float dx = wx - t.x;
                     float dy = wy - t.y;
                     float d2 = dx * dx + dy * dy;
@@ -3235,13 +3525,6 @@ public class StealthPathMod extends mindustry.mod.Mod{
                 }
             }
         }
-
-        if(computeSafeDistanceEnabled()){
-            computeSafeDistance(map);
-        }else{
-            map.safeDist = null;
-        }
-        return map;
     }
 
     private ThreatMap obtainThreatMapScratch(){
@@ -3525,7 +3808,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         return !tile.solid();
     }
 
-    private Seq<Threat> collectThreats(Unit playerUnit, boolean includeUnits, boolean threatsAir, boolean threatsGround){
+    private Seq<Threat> collectTurretThreats(Unit playerUnit, boolean threatsAir, boolean threatsGround){
         Seq<Threat> out = tmpThreats;
         Seq<Threat> derelictOut = tmpDerelictThreats;
         out.clear();
@@ -3545,7 +3828,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
             if(turret.targetHealing) continue;
             if(!((threatsAir && turret.targetAir) || (threatsGround && turret.targetGround))) continue;
 
-            float dps = tb.estimateDps();
+            float dps = estimateTurretThreatDps(tb, turret);
             if(dps <= 0.0001f) continue;
 
             Threat t = new Threat(b.x, b.y, tb.range(), tb.minRange(), dps);
@@ -3556,26 +3839,37 @@ public class StealthPathMod extends mindustry.mod.Mod{
             }
         }
 
-        if(includeUnits){
-            for(int i = 0; i < Groups.unit.size(); i++){
-                Unit u = Groups.unit.index(i);
-                if(u == null) continue;
-                if(u.team == player.team()) continue;
-                if(!u.isAdded() || u.dead()) continue;
-                if(!((threatsAir && u.type.targetAir) || (threatsGround && u.type.targetGround))) continue;
+        if(out.isEmpty()){
+            out.addAll(derelictOut);
+        }
 
-                float range = u.range();
-                if(range <= 0.0001f) continue;
+        return out;
+    }
 
-                float dps = u.type.estimateDps();
-                if(dps <= 0.0001f) continue;
+    private Seq<Threat> collectUnitThreats(Unit playerUnit, boolean threatsAir, boolean threatsGround){
+        Seq<Threat> out = tmpThreats;
+        Seq<Threat> derelictOut = tmpDerelictThreats;
+        out.clear();
+        derelictOut.clear();
 
-                Threat t = new Threat(u.x, u.y, range, 0f, dps);
-                if(u.team == Team.derelict){
-                    derelictOut.add(t);
-                }else{
-                    out.add(t);
-                }
+        for(int i = 0; i < Groups.unit.size(); i++){
+            Unit u = Groups.unit.index(i);
+            if(u == null) continue;
+            if(u.team == player.team()) continue;
+            if(!u.isAdded() || u.dead()) continue;
+            if(!((threatsAir && u.type.targetAir) || (threatsGround && u.type.targetGround))) continue;
+
+            float range = u.range();
+            if(range <= 0.0001f) continue;
+
+            float dps = estimateUnitThreatDps(u);
+            if(dps <= 0.0001f) continue;
+
+            Threat t = new Threat(u.x, u.y, range, 0f, dps);
+            if(u.team == Team.derelict){
+                derelictOut.add(t);
+            }else{
+                out.add(t);
             }
         }
 
@@ -3584,6 +3878,52 @@ public class StealthPathMod extends mindustry.mod.Mod{
         }
 
         return out;
+    }
+
+    private static float estimateTurretThreatDps(Turret.TurretBuild tb, Turret turret){
+        if(tb == null || turret == null) return 0f;
+
+        float dps = Math.max(0f, tb.estimateDps());
+        BulletType ammo = tb.peekAmmo();
+        if(ammo != null){
+            // Vanilla estimateDps() does not include ammo reload multiplier.
+            dps *= Math.max(0f, ammo.reloadMultiplier);
+        }
+
+        dps *= turretCoolantBoostMultiplier(tb, turret);
+        dps *= state.rules.blockDamage(tb.team);
+        return Math.max(0f, dps);
+    }
+
+    private static float turretCoolantBoostMultiplier(Turret.TurretBuild tb, Turret turret){
+        ConsumeLiquidBase coolant = turret.coolant;
+        if(coolant == null) return 1f;
+
+        float coolantEff = coolant.efficiency(tb);
+        if(coolantEff <= 0.0001f) return 1f;
+
+        float amount = coolant.amount * coolantEff;
+        if(amount <= 0.0001f) return 1f;
+
+        float capacity;
+        if(coolant instanceof ConsumeLiquidFilter){
+            Liquid used = ((ConsumeLiquidFilter)coolant).getConsumed(tb);
+            capacity = used == null ? 0.4f : Math.max(0f, used.heatCapacity);
+        }else{
+            Liquid liquid = tb.liquids.current();
+            capacity = liquid != null && coolant.consumes(liquid) ? Math.max(0f, liquid.heatCapacity) : 0.4f;
+        }
+
+        float bonus = amount * capacity * Math.max(0f, turret.coolantMultiplier);
+        return 1f + Mathf.clamp(bonus, 0f, 10f);
+    }
+
+    private static float estimateUnitThreatDps(Unit unit){
+        if(unit == null || unit.type == null) return 0f;
+        float dps = Math.max(0f, unit.type.estimateDps());
+        dps *= Math.max(0f, unit.damageMultiplier());
+        dps *= state.rules.unitDamage(unit.team);
+        return Math.max(0f, dps);
     }
 
     private static IntSeq buildGoalTiles(ThreatMap map, Unit unit, Building target, boolean moveFlying){
@@ -4043,7 +4383,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
                     }else{
                         float distWorld = tilesize * step;
                         float dmg = edgeDamage(map, idx, nidx, distWorld, unit, speed, true);
-                        float tie = step * 0.001f;
+                        float tie = step * 0.00001f;
                         ng = pathBest[idx] + dmg + tie;
                     }
 
@@ -4134,7 +4474,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
                     }else{
                         float distWorld = tilesize * step;
                         float dmg = edgeDamage(map, idx, nidx, distWorld, unit, speed, true);
-                        float tie = step * 0.001f;
+                        float tie = step * 0.00001f;
                         ng = g + dmg + tie;
                     }
 
@@ -4166,7 +4506,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         }
 
         if(!Float.isFinite(best)) return 0f;
-        return mode == PathMode.minDamage ? best * 0.001f : best;
+        return mode == PathMode.minDamage ? best * 0.00001f : best;
     }
 
     private static IntSeq reconstruct(int[] parent, int endIdx){
@@ -4335,7 +4675,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
 
         if(ui == null || ui.hudGroup == null) return;
 
-        if(overlayModeContent == null || overlayDamageContent == null || overlayControlsContent == null){
+        if(overlayModeContent == null || overlayDamageContent == null || overlayControlsContent == null || overlayHoverDpsContent == null){
             buildOverlayWindows();
         }
 
@@ -4343,6 +4683,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         boolean showMode = Core.settings.getBool(keyOverlayWindowMode, true);
         boolean showDamage = Core.settings.getBool(keyOverlayWindowDamage, true);
         boolean showControls = Core.settings.getBool(keyOverlayWindowControls, true);
+        boolean showHoverDps = Core.settings.getBool(keyDebugHoverTurretDps, false);
 
         if(xOverlayUi.isInstalled()){
             try{
@@ -4377,11 +4718,22 @@ public class StealthPathMod extends mindustry.mod.Mod{
                     xOverlayUi.tryConfigureWindow(xControlsWindow, false, true);
                     if(enabled && showControls) xOverlayUi.setEnabledAndPinned(xControlsWindow, true, false);
                 }
+                if(xHoverDpsWindow == null){
+                    try{ overlayHoverDpsContent.remove(); }catch(Throwable ignored){}
+                    xHoverDpsWindow = xOverlayUi.registerWindow(
+                        "stealthpath-hoverdps",
+                        overlayHoverDpsContent,
+                        () -> state != null && state.isGame() && Core.settings.getBool(keyEnabled, true) && Core.settings.getBool(keyDebugHoverTurretDps, false)
+                    );
+                    xOverlayUi.tryConfigureWindow(xHoverDpsWindow, false, true);
+                    if(enabled && showHoverDps) xOverlayUi.setEnabledAndPinned(xHoverDpsWindow, true, false);
+                }
                 return;
             }catch(Throwable ignored){
                 xModeWindow = null;
                 xDamageWindow = null;
                 xControlsWindow = null;
+                xHoverDpsWindow = null;
             }
         }
 
@@ -4389,6 +4741,7 @@ public class StealthPathMod extends mindustry.mod.Mod{
         syncFallbackHud(overlayModeContent, "sp-ov-mode", 8f, -8f, enabled && showMode);
         syncFallbackHud(overlayDamageContent, "sp-ov-dmg", 8f, -84f, enabled && showDamage);
         syncFallbackHud(overlayControlsContent, "sp-ov-ctl", 8f, -152f, enabled && showControls);
+        syncFallbackHudRight(overlayHoverDpsContent, "sp-ov-hover", -8f, -8f, enabled && showHoverDps);
     }
 
     private void syncFallbackHud(Table content, String name, float x, float yFromTop, boolean visible){
@@ -4414,6 +4767,28 @@ public class StealthPathMod extends mindustry.mod.Mod{
             // Anchor near top-left; yFromTop is negative pixels down from top.
             content.setPosition(x, Core.graphics.getHeight() + yFromTop, Align.topLeft);
         });
+    }
+
+    private void syncFallbackHudRight(Table content, String name, float xFromRight, float yFromTop, boolean visible){
+        if(ui == null || ui.hudGroup == null) return;
+        Element existing = ui.hudGroup.find(name);
+        if(!visible){
+            if(existing != null){
+                try{ existing.remove(); }catch(Throwable ignored){}
+            }
+            return;
+        }
+        attachFallbackHudRight(content, name, xFromRight, yFromTop);
+    }
+
+    private void attachFallbackHudRight(Table content, String name, float xFromRight, float yFromTop){
+        if(content == null || ui == null || ui.hudGroup == null) return;
+        if(ui.hudGroup.find(name) != null) return;
+        try{ content.remove(); }catch(Throwable ignored){}
+        content.name = name;
+        ui.hudGroup.addChild(content);
+        content.toFront();
+        content.update(() -> content.setPosition(Core.graphics.getWidth() + xFromRight, Core.graphics.getHeight() + yFromTop, Align.topRight));
     }
 
     private void buildOverlayWindows(){
@@ -4600,6 +4975,55 @@ public class StealthPathMod extends mindustry.mod.Mod{
                 buttonsHost.add(bm).padTop(6f).row();
             }
         });
+
+        // Window 4: hovered tile turret DPS debug panel.
+        overlayHoverDpsContent = new Table();
+        overlayHoverDpsContent.background(bgDraw);
+        overlayHoverDpsContent.margin(8f);
+        overlayHoverDpsContent.touchable = Touchable.disabled;
+        overlayHoverDpsContent.defaults().left().growX().minWidth(0f);
+
+        overlayHoverDpsContent.table(t -> {
+            t.background(borderDraw);
+            t.margin(6f);
+            t.add("SP").color(accent).padRight(6f);
+            t.add("悬停炮塔DPS").color(key);
+        }).growX().row();
+
+        overlayHoverDpsContent.table(t -> {
+            t.left().defaults().left().minWidth(0f).growX();
+            t.add("Tile").color(key).padRight(8f);
+            overlayHoverTileValue = new Label("-", Styles.outlineLabel);
+            overlayHoverTileValue.setColor(value);
+            overlayHoverTileValue.setWrap(true);
+            overlayHoverTileValue.update(() -> {
+                if(debugHoverTileX >= 0 && debugHoverTileY >= 0){
+                    overlayHoverTileValue.setText("(" + debugHoverTileX + "," + debugHoverTileY + ")");
+                }else{
+                    overlayHoverTileValue.setText("-");
+                }
+            });
+            t.add(overlayHoverTileValue).left().growX();
+        }).padTop(6f).growX().row();
+
+        overlayHoverListValue = new Label("", Styles.outlineLabel);
+        overlayHoverListValue.setColor(fg);
+        overlayHoverListValue.setAlignment(Align.left);
+        overlayHoverListValue.setWrap(true);
+        overlayHoverListValue.update(() -> overlayHoverListValue.setText(debugHoverLinesText == null ? "" : debugHoverLinesText));
+        overlayHoverDpsContent.add(overlayHoverListValue).padTop(6f).growX().row();
+
+        overlayHoverDpsContent.table(t -> {
+            t.left().defaults().left().minWidth(0f).growX();
+            t.add("Total").color(key).padRight(8f);
+            overlayHoverTotalValue = new Label("0.0", Styles.outlineLabel);
+            overlayHoverTotalValue.setColor(number);
+            overlayHoverTotalValue.update(() -> overlayHoverTotalValue.setText(Strings.autoFixed(Math.max(0f, debugHoverTurretTotal), 1)));
+            t.add(overlayHoverTotalValue).left().growX();
+        }).padTop(6f).growX().row();
+
+        // Allow arbitrary resize in MindustryX OverlayUI (prevents "snap back" on resize end).
+        overlayHoverDpsContent.add(new PreferAnySize()).grow().row();
     }
 
     private static Drawable tintDrawable(Drawable base, Color tint){
