@@ -3,7 +3,7 @@ plugins{
 }
 
 group = "stealthpath"
-version = "6.0.1"
+version = "6.0.2"
 
 java{
     sourceCompatibility = JavaVersion.VERSION_1_8
@@ -16,13 +16,14 @@ repositories{
 }
 
 def mindustryVersion = (findProperty("mindustryVersion") ?: "v154.3").toString()
+def arcVersion = (findProperty("arcVersion") ?: "ec5df18e54").toString()
 
 configurations.configureEach{
     resolutionStrategy.eachDependency{ details ->
-        // MindustryJitpack can request Arc modules by commit hash, but JitPack hosts tag versions.
-        if(details.requested.group == "com.github.Anuken.Arc" && details.requested.version == "ec5df18e54"){
-            details.useVersion(mindustryVersion)
-            details.because("Use JitPack Arc tag artifacts for stable dependency resolution")
+        // MindustryJitpack v154.3 resolves Arc from commit-hash artifacts on JitPack.
+        if(details.requested.group == "com.github.Anuken.Arc" && details.requested.version == mindustryVersion){
+            details.useVersion(arcVersion)
+            details.because("Use the published Arc commit-hash artifacts required by MindustryJitpack")
         }
     }
 }

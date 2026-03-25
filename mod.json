@@ -4,7 +4,7 @@
   "author": "DeterMination",
   "repo": "Wind-DeterMination-backup/StealthPath",
   "description": "Plan safer assault routes by simulating turret/unit threat fields, then draw low-damage or nearest paths with auto-move support. / 基于炮塔与单位威胁场规划低伤或最近路线，支持自动移动与实时路径叠加。",
-  "version": "6.0.1",
+  "version": "6.0.2",
   "minGameVersion": "154",
   "hidden": true,
   "java": true,
