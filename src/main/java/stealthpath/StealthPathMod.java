@@ -3755,14 +3755,16 @@ public class StealthPathMod extends mindustry.mod.Mod{
     }
 
     private Seq<Building> collectEnemyTurretBuildings(Unit playerUnit, boolean threatsAir, boolean threatsGround){
+        if(player == null) return new Seq<>();
         Seq<Building> out = new Seq<>();
         Seq<Building> derelictOut = new Seq<>();
 
+        Team myTeam = player.team();
         Seq<Building> builds = anchorBuildings();
         for(int i = 0; i < builds.size; i++){
             Building b = builds.get(i);
             if(b == null) continue;
-            if(b.team == player.team()) continue;
+            if(b.team == myTeam) continue;
             if(!canTurretThreatMode(b, threatsAir, threatsGround)) continue;
             if(estimateTurretThreatDps(b) <= 0.0001f) continue;
 
@@ -4820,16 +4822,12 @@ public class StealthPathMod extends mindustry.mod.Mod{
 
     private static void mergeUniqueInts(IntSeq dst, IntSeq src){
         if(dst == null || src == null || src.isEmpty()) return;
+        IntSet existing = new IntSet(dst.size + src.size);
+        for(int i = 0; i < dst.size; i++) existing.add(dst.items[i]);
         for(int i = 0; i < src.size; i++){
-            pushUnique(dst, src.items[i]);
+            int v = src.items[i];
+            if(existing.add(v)) dst.add(v);
         }
-    }
-
-    private static void pushUnique(IntSeq seq, int value){
-        for(int i = 0; i < seq.size; i++){
-            if(seq.items[i] == value) return;
-        }
-        seq.add(value);
     }
 
     private PathResult findPathAStar(ThreatMap map, int startX, int startY, IntSeq goals, boolean[] goalMask, PathMode mode, Unit unit, float speed){
