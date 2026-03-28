@@ -25,6 +25,7 @@ import arc.scene.ui.TextButton;
 import arc.scene.event.Touchable;
 import arc.scene.ui.layout.Table;
 import arc.struct.IntSeq;
+import arc.struct.IntSet;
 import arc.struct.Seq;
 import arc.math.geom.Vec2;
 import arc.util.Align;
